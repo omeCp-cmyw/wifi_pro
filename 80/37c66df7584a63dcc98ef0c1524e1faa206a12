@@ -1,0 +1,18 @@
+Makefile
+  h_ac9b12d9658a21 1-17
+README.md
+  h_ac9b12d9658a21 1
+esp01s_wifi.c
+  h_ac9b12d9658a21 1-720
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "8037c66df7584a63dcc98ef0c1524e1faa206a12",
+  "prompts": {},
+  "humans": {
+    "h_ac9b12d9658a21": {
+      "author": "yanwei <yanwei@yaxon.com>"
+    }
+  }
+}
