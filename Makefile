@@ -1,17 +1,22 @@
 CC      = gcc
 CFLAGS  = -Wall -Wextra -O2
-TARGET  = esp01s_wifi
-SRC     = esp01s_wifi.c
+TARGET  = onenet_wifi
+
+SRCS    = $(shell find src -name '*.c')
+OBJS    = $(SRCS:.c=.o)
 
 all: $(TARGET)
 
-$(TARGET): $(SRC)
+$(TARGET): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $^
 
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGET) $(OBJS)
 
 run: $(TARGET)
-	sudo ./$^ 0
+	sudo ./$^
 
 .PHONY: all clean run
