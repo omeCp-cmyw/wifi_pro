@@ -163,6 +163,7 @@ static int ntp_sync(void)
             printf("cipsend link 0 failed\n");
             break;
         }
+        esp_at_hex_dump("[TX] ntp request", req, req_len);
         if (esp_at_write_raw(req, req_len) != 0)
             break;
 
@@ -329,7 +330,7 @@ static int run(void)
         }
     }
 
-    /* 退出前收尾: 先断MQTT再关链路 */
+    /* 退出前收尾: 在线就关掉云端链路 */
     if (onenet_is_online())
         esp_at_cmd_exec(WIFI_CMD_CIPCLOSE, NULL, ONENET_LINK_MQTT);
     return EXIT_SUCCESS;

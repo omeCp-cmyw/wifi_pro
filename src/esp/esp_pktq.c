@@ -176,6 +176,7 @@ void esp_pktq_pump(void)
         send_ret = esp_at_cmd_exec(WIFI_CMD_CIPSEND, NULL,
                                    node->link, node->len);
         if (send_ret == ESP_AT_OK) {
+            esp_at_hex_dump("[TX] pktq payload", node->data, node->len);
             if (esp_at_write_raw(node->data, node->len) != 0) {
                 node_finish(idx, 0);
                 break;

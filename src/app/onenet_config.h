@@ -6,6 +6,10 @@
 #define ONENET_WIFI_SSID        "123"
 #define ONENET_WIFI_PASS        "yw22334455"
 
+/* 协议选择: 二选一, 改完make clean重编 */
+#define ONENET_USE_MQTT         0
+#define ONENET_USE_HTTP         1
+
 /* 链路0: NTP校时 */
 #define ONENET_NTP_SERVER       "ntp.aliyun.com"
 #define ONENET_NTP_PORT         123
@@ -14,12 +18,24 @@
 #define ONENET_NTP_RESYNC_SEC   3600    /* 主循环重校时周期 */
 #define ONENET_NTP_RECONN_TRIES 3       /* 重连流程内补校时次数上限, 耗尽用兜底时间 */
 
-/* 链路1: OneNET broker */
+/* 链路1 MQTT: OneNET broker */
 #define ONENET_BROKER_HOST      "mqtts.heclouds.com"
 #define ONENET_BROKER_PORT      1883
 #define ONENET_KEEPALIVE_SEC    60
 #define ONENET_CLIENT_ID        "smartdap"
 #define ONENET_USERNAME         "X9Dcio5cI0"
+
+/* 链路1 HTTP: 物模型属性上报接入点, 短连接每次上报重开;
+ * 官方推荐域名走80明文, 路径不带/fuse/http前缀; 旧IP直连与
+ * /fuse/http路径已在平台侧下线, open.iot.10086.cn仅支持HTTPS不适用 */
+#define ONENET_HTTP_HOST        "iot-http.heclouds.com"
+#define ONENET_HTTP_PORT        80
+#define ONENET_HTTP_PATH        "/device/thing/property/post"
+#define ONENET_HTTP_PRODUCT_ID  "gZSY9iX0tP"
+#define ONENET_HTTP_DEVICE_NAME "temp"
+#define ONENET_HTTP_ACCESS_KEY  "o0trd0lLvyPhqUPFRdmRHbllH1tj82nph9E97yFXz2s="
+#define ONENET_HTTP_SEND_TIMEOUT_MS  10000  /* SEND OK等待 */
+#define ONENET_HTTP_RESP_TIMEOUT_MS  10000  /* 应答等待 */
 
 /* 设备鉴权token参数, 登录密码由onenet_token_build运行时计算 */
 #define ONENET_ACCESS_KEY       "THNpOEhkcFVXb1VBSFE5b0JnWmZDbFBBcmJYUUtyQkM="
@@ -61,6 +77,6 @@
 
 /* 链路号分配 */
 #define ONENET_LINK_NTP         0
-#define ONENET_LINK_MQTT        1
+#define ONENET_LINK_MQTT        1       /* 云端链路, HTTP模式复用同一条 */
 
 #endif

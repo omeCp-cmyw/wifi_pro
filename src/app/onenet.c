@@ -8,7 +8,11 @@
 #include "onenet_token.h"
 #include "../esp/esp_at.h"
 #include "../esp/esp_pktq.h"
+#if ONENET_USE_MQTT
 #include "../proto/mqtt.h"
+#elif ONENET_USE_HTTP
+#include "../proto/http.h"
+#endif
 #include "../proto/ntp.h"
 
 enum {
@@ -43,22 +47,31 @@ static prop_t s_props[] = {
 #define PROP_NUM   (sizeof(s_props) / sizeof(s_props[0]))
 
 static int g_msg_id = 1;
+#if ONENET_USE_MQTT
 static char g_platform_id[32] = "0";    /* 平台下发命令的id, 回执时带上 */
 
 /* led事件模拟源 */
 static int g_led1, g_led2, g_led_dirty;
+#endif
 
+#if ONENET_USE_MQTT
 /* 建链状态 */
 enum { SUB_IDLE, SUB_RUNNING, SUB_DONE };
+#endif
 static int s_online;
+#if ONENET_USE_MQTT
 static int s_sub_state = SUB_IDLE;
 static int s_suback_cnt;
 static int s_connack_ok;
 static int s_ping_pending;
+#endif
 static uint64_t s_last_report;
+#if ONENET_USE_MQTT
 static uint64_t s_last_ping;
 static uint64_t s_last_led_sim;
+#endif
 
+#if ONENET_USE_MQTT
 /* 订阅的4个下行topic模板 */
 static const char *s_sub_topics[] = {
     ONENET_TOPIC_POST_REPLY,
@@ -73,6 +86,7 @@ static char s_topic_post_reply[ONENET_TOPIC_MAX_LEN];
 static char s_topic_event_reply[ONENET_TOPIC_MAX_LEN];
 static char s_topic_set[ONENET_TOPIC_MAX_LEN];
 static char s_topic_desired_reply[ONENET_TOPIC_MAX_LEN];
+#endif
 
 /*******************************************************************
 ** 函数名	: json_append
@@ -101,6 +115,7 @@ static int json_append(char *buf, int size, int off, const char *fmt, ...)
     return off;
 }
 
+#if ONENET_USE_MQTT
 /*******************************************************************
 ** 函数名	: prop_value_str
 ** 函数描述	: 属性值转JSON文本(数字不加引号, bool小写)
@@ -145,7 +160,9 @@ static int build_property_post(char *buf, int size)
     off = json_append(buf, size, off, "}}");
     return off > 0 && off < size ? off : -1;
 }
+#endif /* ONENET_USE_MQTT */
 
+#if ONENET_USE_MQTT
 /*******************************************************************
 ** 函数名	: build_event_led
 ** 函数描述	: 构造led事件上报JSON
@@ -632,6 +649,7 @@ static int delay_pump(int ms)
     }
     return 0;
 }
+#endif /* ONENET_USE_MQTT */
 
 /*******************************************************************
 ** 函数名	: onenet_init
@@ -642,6 +660,7 @@ static int delay_pump(int ms)
 void onenet_init(void)
 {
     g_msg_id = 1;
+#if ONENET_USE_MQTT
     g_led1 = g_led2 = 0;
     g_led_dirty = 0;
 
@@ -654,8 +673,10 @@ void onenet_init(void)
     snprintf(s_topic_desired_reply, sizeof(s_topic_desired_reply),
              ONENET_TOPIC_DESIRED_REPLY, ONENET_PRODUCT_ID,
              ONENET_DEVICE_NAME);
+#endif
 }
 
+#if ONENET_USE_MQTT
 /*******************************************************************
 ** 函数名	: onenet_set_led
 ** 函数描述	: 设置led事件值, 变化时置脏等主循环上报
@@ -701,7 +722,9 @@ int onenet_connect(int et_fallback_ok)
         printf("ntp time not synced, token et unavailable\n");
         goto fail;
     }
-    if (onenet_token_build(expire_ts, token, sizeof(token)) != 0) {
+    if (onenet_token_build(ONENET_PRODUCT_ID, ONENET_DEVICE_NAME,
+                           ONENET_ACCESS_KEY, expire_ts,
+                           token, sizeof(token)) != 0) {
         printf("token build failed\n");
         goto fail;
     }
@@ -786,6 +809,285 @@ fail:
     return -1;
 }
 
+#elif ONENET_USE_HTTP
+
+/* HTTP模式: 短连接上报, token在connect时算好缓存, 过期按1104延长重签 */
+static char s_http_token[ONENET_TOKEN_MAX_LEN];
+static uint32_t s_http_et;
+static char s_http_resp[1024];
+static int s_http_resp_len;
+static int s_http_resp_done;
+static int s_http_waiting;
+static int s_http_peer_closed;      /* 服务端断链通知已到达 */
+
+/*******************************************************************
+** 函数名	: http_feed
+** 函数描述	: 等应答期间累积链路1载荷, 体里的errno出现即收齐,
+**          : 不必等服务端断链, 省掉尾部等待
+** 参数		: [in] data: 载荷数据
+**          : [in] len: 载荷长度
+** 返回		: 无
+********************************************************************/
+static void http_feed(const uint8_t *data, int len)
+{
+    int take;
+
+    if (s_http_resp_len >= (int)sizeof(s_http_resp) - 1)
+        return;
+    take = len;
+    if (take > (int)sizeof(s_http_resp) - 1 - s_http_resp_len)
+        take = (int)sizeof(s_http_resp) - 1 - s_http_resp_len;
+    memcpy(s_http_resp + s_http_resp_len, data, (size_t)take);
+    s_http_resp_len += take;
+    s_http_resp[s_http_resp_len] = '\0';
+    if (strstr(s_http_resp, "\"errno\"") != NULL)
+        s_http_resp_done = 1;
+}
+
+/*******************************************************************
+** 函数名	: http_prop_value
+** 函数描述	: 按key取属性当前值的JSON文本, 找不到返回空串,
+**          : 拼出的JSON宁可缺字段也不带非法值
+** 参数		: [in] key: 属性名
+**          : [out] buf: 输出缓冲
+**          : [in] size: 缓冲大小
+** 返回		: 写入长度, -1未找到
+********************************************************************/
+static int http_prop_value(const char *key, char *buf, int size)
+{
+    for (size_t i = 0; i < PROP_NUM; i++) {
+        if (strcmp(s_props[i].key, key) != 0)
+            continue;
+        switch (s_props[i].type) {
+        case PROP_FLOAT:
+            return snprintf(buf, (size_t)size, "%.1f", s_props[i].float_val);
+        default:
+            return snprintf(buf, (size_t)size, "%d", s_props[i].int_val);
+        }
+    }
+    buf[0] = '\0';
+    return -1;
+}
+
+/*******************************************************************
+** 函数名	: build_http_post
+** 函数描述	: 构造HTTP上报JSON: 只报humidity_value与CSQ,
+**          : 与onenet_http工程的字段和格式对齐
+** 参数		: [out] buf: 输出缓冲
+**          : [in] size: 缓冲大小
+** 返回		: JSON长度, -1失败
+********************************************************************/
+static int build_http_post(char *buf, int size)
+{
+    static const char *http_keys[] = { "humidity_value", "CSQ" };
+    int64_t ts = ntp_now_ms();
+    int off = 0;
+    char vstr[32];
+
+    off = json_append(buf, size, off,
+                      "{\"id\":\"%d\",\"version\":\"1.0\",\"params\":{",
+                      g_msg_id++);
+    for (size_t i = 0;
+         i < sizeof(http_keys) / sizeof(http_keys[0]); i++) {
+        if (http_prop_value(http_keys[i], vstr, sizeof(vstr)) < 0)
+            continue;
+        off = json_append(buf, size, off,
+                          "%s\"%s\":{\"value\":%s,\"time\":%lld}",
+                          i ? "," : "", http_keys[i], vstr,
+                          (long long)ts);
+    }
+    off = json_append(buf, size, off, "}}");
+    return off > 0 && off < size ? off : -1;
+}
+
+/*******************************************************************
+** 函数名	: http_close_link
+** 函数描述	: 事务收尾断链: 请求带Connection: close, 服务端响应完自行断链,
+**          : 通知已到就不再发CIPCLOSE; 没到则短等后再盲发一枪不等确认,
+**          : 避免对已关链路等OK白耗超时(模块会回ERROR)
+** 参数		: 无
+** 返回		: 无
+********************************************************************/
+static void http_close_link(void)
+{
+    static const char close_cmd[] = "AT+CIPCLOSE=1\r\n";
+    uint64_t deadline;
+
+    s_http_waiting = 0;
+    if (s_http_peer_closed)
+        return;
+
+    /* errno先到时断链通知可能略滞后, 给服务端一点自关时间 */
+    deadline = esp_at_now_ms() + 500;
+    while (!s_http_peer_closed && esp_at_now_ms() < deadline) {
+        if (esp_at_pump(50) < 0)
+            break;
+    }
+    if (s_http_peer_closed)
+        return;
+
+    if (esp_at_write_raw((const uint8_t *)close_cmd,
+                         (int)sizeof(close_cmd) - 1) == 0)
+        esp_at_pump(200);       /* 冲刷残余OK/ERROR, 不作判定 */
+}
+
+/*******************************************************************
+** 函数名	: http_report_once
+** 函数描述	: 一次完整上报事务: CIPSTART->POST->SEND OK->等应答->
+**          : 判定->断链(服务端自关优先); token过期(1104)延长et重签后重试一次;
+**          : 请求体走裸发不走包队列, 全量JSON加头部超包节点上限,
+**          : 同步等SEND OK后再等应答, 请求与应答严格串行
+** 参数		: 无
+** 返回		: 0上报成功, -1失败(由上层置离线走重连)
+********************************************************************/
+static int http_report_once(void)
+{
+    char json[ESP_PKTQ_SIZE];
+    char req[2048];
+    char path_query[160];
+    int json_len, req_len, attempt;
+    uint64_t deadline;
+
+    json_len = build_http_post(json, sizeof(json));
+    if (json_len <= 0) {
+        printf("http json build failed\n");
+        return -1;
+    }
+
+    for (attempt = 0; attempt < 2; attempt++) {
+        int status;
+
+        snprintf(path_query, sizeof(path_query),
+                 "%s?topic=$sys/%s/%s/thing/property/post&protocol=http",
+                 ONENET_HTTP_PATH, ONENET_HTTP_PRODUCT_ID,
+                 ONENET_HTTP_DEVICE_NAME);
+        req_len = http_build_request(req, sizeof(req), ONENET_HTTP_HOST,
+                                     path_query, s_http_token, json, json_len);
+        if (req_len <= 0) {
+            printf("http request build failed\n");
+            return -1;
+        }
+
+        if (esp_at_cmd_exec(WIFI_CMD_CIPSTART_TCP, NULL, ONENET_HTTP_HOST,
+                            ONENET_HTTP_PORT) != ESP_AT_OK) {
+            printf("http tcp connect to %s:%d failed\n",
+                   ONENET_HTTP_HOST, ONENET_HTTP_PORT);
+            return -1;
+        }
+
+        s_http_resp_len = 0;
+        s_http_resp[0] = '\0';
+        s_http_resp_done = 0;
+        s_http_peer_closed = 0;
+        s_http_waiting = 1;
+        printf("http post (%d bytes)\n", req_len);
+        if (esp_at_cmd_exec(WIFI_CMD_CIPSEND, NULL, ONENET_LINK_MQTT,
+                            req_len) != ESP_AT_OK) {
+            printf("http send failed\n");
+            goto fail;
+        }
+        esp_at_hex_dump("[TX] http request", (const uint8_t *)req, req_len);
+        if (esp_at_write_raw((const uint8_t *)req, req_len) != 0 ||
+            esp_at_pump_wait("SEND OK", "SEND FAIL",
+                             ONENET_HTTP_SEND_TIMEOUT_MS) != 1) {
+            printf("http send failed\n");
+            goto fail;
+        }
+
+        /* 应答结束两条路: 体里errno出现, 或服务端断开链路 */
+        deadline = esp_at_now_ms() + ONENET_HTTP_RESP_TIMEOUT_MS;
+        while (!s_http_resp_done) {
+            if (esp_at_now_ms() >= deadline) {
+                printf("http resp timeout\n");
+                goto fail;
+            }
+            if (esp_at_pump(100) < 0)
+                goto fail;
+        }
+        http_close_link();
+
+        status = http_resp_status(s_http_resp, s_http_resp_len);
+        if (status == HTTP_RESP_OK) {
+            printf("http report ok\n");
+            return 0;
+        }
+        if (status == HTTP_RESP_TOKEN_EXP && attempt == 0) {
+            printf("token expired, extend et and retry\n");
+            s_http_et += ONENET_TOKEN_VALID_SEC;
+            if (onenet_token_build(ONENET_HTTP_PRODUCT_ID,
+                                   ONENET_HTTP_DEVICE_NAME,
+                                   ONENET_HTTP_ACCESS_KEY, s_http_et,
+                                   s_http_token,
+                                   sizeof(s_http_token)) != 0)
+                return -1;
+            continue;
+        }
+        printf("http report rejected: %.*s\n",
+               s_http_resp_len, s_http_resp);
+        return -1;
+    }
+    return -1;
+
+fail:
+    http_close_link();
+    return -1;
+}
+
+/*******************************************************************
+** 函数名	: onenet_connect
+** 函数描述	: HTTP模式建链只做凭证准备: 按NTP时间或兜底算token,
+**          : TCP连接留到每次上报时短开短关, 避免链路长期挂着浪费
+** 参数		: [in] et_fallback_ok: 未校时是否允许用兜底过期时间建链
+** 返回		: 0成功, -1失败
+********************************************************************/
+int onenet_connect(int et_fallback_ok)
+{
+    uint32_t expire_ts;
+
+    s_online = 0;
+
+    /* et优先取NTP校时时间戳加有效期; 补校时耗尽且允许兜底才用兜底值 */
+    if (ntp_time_valid()) {
+        expire_ts = (uint32_t)ntp_now_unix() + ONENET_TOKEN_VALID_SEC;
+    } else if (et_fallback_ok) {
+        expire_ts = ONENET_TOKEN_ET_FALLBACK;
+    } else {
+        printf("ntp time not synced, token et unavailable\n");
+        return -1;
+    }
+    if (onenet_token_build(ONENET_HTTP_PRODUCT_ID, ONENET_HTTP_DEVICE_NAME,
+                           ONENET_HTTP_ACCESS_KEY, expire_ts,
+                           s_http_token, sizeof(s_http_token)) != 0) {
+        printf("token build failed\n");
+        return -1;
+    }
+
+    s_http_et = expire_ts;
+    s_http_waiting = 0;
+    s_online = 1;
+    s_last_report = 0;
+    printf("http ready, first report soon\n");
+    return 0;
+}
+
+/*******************************************************************
+** 函数名	: onenet_link_feed
+** 函数描述	: 链路1载荷入口: 只在等应答期间累积, 非等待期的是上次事务残留, 直接丢弃
+** 参数		: [in] link: 链路号, 非链路1丢弃
+**          : [in] data: 载荷数据
+**          : [in] len: 载荷长度
+** 返回		: 无
+********************************************************************/
+void onenet_link_feed(int link, const uint8_t *data, int len)
+{
+    if (link != ONENET_LINK_MQTT)
+        return;
+    if (s_http_waiting)
+        http_feed(data, len);
+}
+
+#endif /* ONENET_USE_MQTT / ONENET_USE_HTTP */
+
 /*******************************************************************
 ** 函数名	: onenet_is_online
 ** 函数描述	: 查询链路1是否完成建链
@@ -797,6 +1099,7 @@ int onenet_is_online(void)
     return s_online;
 }
 
+#if ONENET_USE_MQTT
 /*******************************************************************
 ** 函数名	: onenet_process
 ** 函数描述	: 主循环周期调用, 驱动上报/心跳/led模拟源
@@ -859,6 +1162,34 @@ void onenet_process(void)
     }
 }
 
+#elif ONENET_USE_HTTP
+/*******************************************************************
+** 函数名	: onenet_process
+** 函数描述	: 主循环周期调用, 到期发一次HTTP上报事务,
+**          : 失败置离线交给main重连循环退避重进
+** 参数		: 无
+** 返回		: 无
+********************************************************************/
+void onenet_process(void)
+{
+    uint64_t now = esp_at_now_ms();
+
+    if (!s_online)
+        return;
+
+    if (s_last_report == 0 ||
+        now - s_last_report >= (uint64_t)ONENET_REPORT_SEC * 1000) {
+        s_last_report = now;
+        if (http_report_once() != 0) {
+            printf("http report failed, link down\n");
+            s_online = 0;
+        }
+    }
+}
+
+#endif /* ONENET_USE_MQTT / ONENET_USE_HTTP */
+
+#if ONENET_USE_MQTT
 /*******************************************************************
 ** 函数名	: onenet_on_link_closed
 ** 函数描述	: 链路被模块关闭时的通知
@@ -877,6 +1208,25 @@ void onenet_on_link_closed(int link)
     s_ping_pending = 0;
 }
 
+#elif ONENET_USE_HTTP
+/*******************************************************************
+** 函数名	: onenet_on_link_closed
+** 函数描述	: 链路1关闭通知: 等应答期间断开也算应答收齐,
+**          : 置收齐交给判定函数按已有内容判, 不能据此判离线
+** 参数		: [in] link: 链路号, 非链路1忽略
+** 返回		: 无
+********************************************************************/
+void onenet_on_link_closed(int link)
+{
+    if (link != ONENET_LINK_MQTT)
+        return;
+    s_http_peer_closed = 1;
+    if (s_http_waiting)
+        s_http_resp_done = 1;
+}
+
+#endif /* ONENET_USE_MQTT / ONENET_USE_HTTP */
+
 /*******************************************************************
 ** 函数名	: onenet_on_wifi_lost
 ** 函数描述	: WIFI DISCONNECT通知, 云端状态一并作废
@@ -887,7 +1237,9 @@ void onenet_on_wifi_lost(void)
 {
     printf("wifi disconnect\n");
     s_online = 0;
+#if ONENET_USE_MQTT
     s_sub_state = SUB_IDLE;
     s_suback_cnt = 0;
     s_ping_pending = 0;
+#endif
 }

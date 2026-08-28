@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include "esp_link.h"
+#include "esp_at.h"
 
 /*
  * 接收侧只有两件事: 从原始字节流里切出文本行, 切出+IPD载荷。
@@ -215,6 +216,7 @@ static void ipd_dispatch(int link, const uint8_t *data, int len)
         return;
     }
     printf("[RX] ipd link %d, %d bytes\n", link, len);
+    esp_at_hex_dump("[RX] ipd payload", data, len);
     s_rx_cb[link](link, data, len);
 }
 
