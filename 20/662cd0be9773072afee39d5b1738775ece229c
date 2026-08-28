@@ -1,0 +1,30 @@
+src/app/onenet.c
+  h_ac9b12d9658a21 11,13-15,50,55,57,60,62,67,69,72,74,89,118,163,165,652,663,676,679,725-727,812-1090,1102,1165-1192,1211-1229,1240,1244
+src/app/onenet_config.h
+  h_ac9b12d9658a21 9-12,21,28-39,80
+src/app/onenet_token.c
+  h_ac9b12d9658a21 185-190,195-197,209,213
+src/app/onenet_token.h
+  h_ac9b12d9658a21 12-17,22-24
+src/esp/esp_link.c
+  h_ac9b12d9658a21 5,219
+src/esp/esp_pktq.c
+  h_ac9b12d9658a21 179
+src/main.c
+  h_ac9b12d9658a21 166,333
+src/proto/http.c
+  h_ac9b12d9658a21 1-69
+src/proto/http.h
+  h_ac9b12d9658a21 1-36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "20662cd0be9773072afee39d5b1738775ece229c",
+  "prompts": {},
+  "humans": {
+    "h_ac9b12d9658a21": {
+      "author": "yanwei <yanwei@yaxon.com>"
+    }
+  }
+}
