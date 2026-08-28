@@ -5,15 +5,11 @@
 
 #include "onenet.h"
 #include "onenet_config.h"
+#include "onenet_token.h"
 #include "../esp/esp_at.h"
 #include "../esp/esp_pktq.h"
 #include "../proto/mqtt.h"
 #include "../proto/ntp.h"
-
-/*
- * OneNET物模型业务: 11个属性 + led事件。
- * JSON不引三方库, 上行snprintf手拼, 下行find_field手撕。
- */
 
 enum {
     PROP_INT,
@@ -680,12 +676,14 @@ static void onenet_set_led(int led1, int led2)
 /*******************************************************************
 ** 函数名	: onenet_connect
 ** 函数描述	: 链路1建链: CIPSTART->CONNECT->CONNACK->订阅4个topic
-** 参数		: 无
+** 参数		: [in] et_fallback_ok: 未校时是否允许用兜底过期时间建链
 ** 返回		: 0成功, -1失败
 ********************************************************************/
-int onenet_connect(void)
+int onenet_connect(int et_fallback_ok)
 {
     uint8_t buf[512];
+    char token[ONENET_TOKEN_MAX_LEN];
+    uint32_t expire_ts;
     int pkt_len, conn_ret;
 
     s_online = 0;
@@ -693,6 +691,20 @@ int onenet_connect(void)
     s_suback_cnt = 0;
     s_connack_ok = 0;
     s_ping_pending = 0;
+
+    /* et优先取NTP校时时间戳加有效期; 补校时耗尽且允许兜底才用兜底值 */
+    if (ntp_time_valid()) {
+        expire_ts = (uint32_t)ntp_now_unix() + ONENET_TOKEN_VALID_SEC;
+    } else if (et_fallback_ok) {
+        expire_ts = ONENET_TOKEN_ET_FALLBACK;
+    } else {
+        printf("ntp time not synced, token et unavailable\n");
+        goto fail;
+    }
+    if (onenet_token_build(expire_ts, token, sizeof(token)) != 0) {
+        printf("token build failed\n");
+        goto fail;
+    }
 
     conn_ret = esp_at_cmd_exec(WIFI_CMD_CIPSTART_TCP, NULL,
                                ONENET_BROKER_HOST, ONENET_BROKER_PORT);
@@ -703,7 +715,7 @@ int onenet_connect(void)
     }
 
     pkt_len = mqtt_build_connect(buf, sizeof(buf), ONENET_CLIENT_ID,
-                                 ONENET_USERNAME, ONENET_PASSWORD,
+                                 ONENET_USERNAME, token,
                                  ONENET_KEEPALIVE_SEC);
     if (pkt_len <= 0 ||
         esp_pktq_enqueue(ONENET_LINK_MQTT, buf, pkt_len, 1, NULL, NULL) != 0)

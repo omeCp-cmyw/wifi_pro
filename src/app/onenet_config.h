@@ -12,6 +12,7 @@
 #define ONENET_NTP_TIMEOUT_MS   10000   /* 单次应答等待 */
 #define ONENET_NTP_TRIES        3       /* 请求重发次数 */
 #define ONENET_NTP_RESYNC_SEC   3600    /* 主循环重校时周期 */
+#define ONENET_NTP_RECONN_TRIES 3       /* 重连流程内补校时次数上限, 耗尽用兜底时间 */
 
 /* 链路1: OneNET broker */
 #define ONENET_BROKER_HOST      "mqtts.heclouds.com"
@@ -19,9 +20,13 @@
 #define ONENET_KEEPALIVE_SEC    60
 #define ONENET_CLIENT_ID        "smartdap"
 #define ONENET_USERNAME         "X9Dcio5cI0"
-#define ONENET_PASSWORD         \
-    "version=2018-10-31&res=products%2FX9Dcio5cI0%2Fdevices%2Fsmartdap" \
-    "&et=1872999428&method=md5&sign=9O5UvQMNFFQ6bPDtn3iHcA%3D%3D"
+
+/* 设备鉴权token参数, 登录密码由onenet_token_build运行时计算 */
+#define ONENET_ACCESS_KEY       "THNpOEhkcFVXb1VBSFE5b0JnWmZDbFBBcmJYUUtyQkM="
+#define ONENET_TOKEN_VERSION    "2018-10-31"
+#define ONENET_TOKEN_METHOD     "md5"
+#define ONENET_TOKEN_VALID_SEC  2592000     /* token有效期30天, et=当前时间+有效期 */
+#define ONENET_TOKEN_ET_FALLBACK 1872999428 /* 补校时耗尽后的兜底过期时间(2029年) */
 
 #define ONENET_PRODUCT_ID       "X9Dcio5cI0"
 #define ONENET_DEVICE_NAME      "smartdap"

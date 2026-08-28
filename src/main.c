@@ -187,12 +187,14 @@ static int ntp_sync(void)
 
 /*******************************************************************
 ** 函数名	: onenet_reconnect
-** 函数描述	: 链路1掉线后的恢复: 必要时重连AP, 指数退避重建
+** 函数描述	: 链路1掉线后的恢复: 必要时重连AP/补校时, 指数退避重建;
+**             补校时连败达上限后改用兜底过期时间建链
 ** 参数		: [in] backoff: 上次退避秒数
 ** 返回		: 本次退避秒数(成功后为0)
 ********************************************************************/
 static int onenet_reconnect(int backoff)
 {
+    static int ntp_retry_cnt;
     uint64_t retry_at = esp_at_now_ms();
 
     if (backoff == 0)
@@ -219,9 +221,30 @@ static int onenet_reconnect(int backoff)
             g_wifi_down = 0;
         }
 
+        /* token的et依赖NTP时间戳, 未校时先补校时; 连败达上限后放行兜底时间戳 */
+        if (!ntp_time_valid()) {
+            if (ntp_sync() == 0) {
+                printf("ntp synced\n");
+                ntp_retry_cnt = 0;
+            } else if (ntp_retry_cnt < ONENET_NTP_RECONN_TRIES - 1) {
+                ntp_retry_cnt++;
+                printf("ntp sync failed, retry %d/%d\n",
+                       ntp_retry_cnt, ONENET_NTP_RECONN_TRIES);
+                retry_at = esp_at_now_ms() + (uint64_t)backoff * 1000;
+                backoff = backoff * 2 > ONENET_RECONN_MAX_SEC
+                        ? ONENET_RECONN_MAX_SEC : backoff * 2;
+                continue;
+            } else {
+                printf("ntp sync failed %d times, build with fallback et\n",
+                       ONENET_NTP_RECONN_TRIES);
+            }
+        }
+
         printf("connecting onenet, backoff %ds\n", backoff);
-        if (onenet_connect() == 0)
+        if (onenet_connect(!ntp_time_valid()) == 0) {
+            ntp_retry_cnt = 0;
             return 0;
+        }
 
         retry_at = esp_at_now_ms() + (uint64_t)backoff * 1000;
         backoff = backoff * 2 > ONENET_RECONN_MAX_SEC
@@ -264,8 +287,8 @@ static int run(void)
     ntp_sync();
     last_resync = esp_at_now_ms();
 
-    /* 阶段二: 链路1建链 */
-    if (onenet_connect() != 0)
+    /* 阶段二: 链路1建链, 首次不允许兜底时间, 失败交重连流程补校时 */
+    if (onenet_connect(0) != 0)
         printf("onenet connect failed, enter reconnect loop\n");
 
     printf("main loop running, ctrl-c to quit\n");
